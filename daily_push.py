@@ -426,10 +426,12 @@ def main():
             image_key = upload_image(token, buf.getvalue())
             msg_id_img = send_image_message(token, chat_id, image_key)
             print(f"  图片消息已发送: {msg_id_img}")
-            # 摘要文本
-            summary_text = f"📰 {date_str} AI圈日报\n共 {total} 条精选动态，长图已推送。"
-            msg_id_txt = send_text_message(token, chat_id, summary_text)
-            print(f"  摘要消息已发送: {msg_id_txt}")
+            # 推送完整分析文案（飞书文本消息限制约30KB，截取前4000字）
+            article_text = article.replace("\\n", "\n")
+            if len(article_text) > 4000:
+                article_text = article_text[:4000] + "\n\n...(完整文案见 Markdown 文件)"
+            msg_id_txt = send_text_message(token, chat_id, article_text)
+            print(f"  分析文案已发送: {msg_id_txt}")
         except Exception as e:
             print(f"[ERROR] 推送失败: {e}", file=sys.stderr)
             sys.exit(1)
