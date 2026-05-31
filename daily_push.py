@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI 日报全流程脚本：抓取 → 生成图片/文案 → 推送飞书群。
+"""AI 日报全流程脚本：从 AI HOT (aihot.virxact.com) 获取真实日报内容 → 生成图片/文案 → 推送飞书群。
 
 同时兼容 Windows 本地运行 和 GitHub Actions Linux runner。
 GitHub Actions 通过环境变量注入凭据：
@@ -26,6 +26,7 @@ CAT_COLORS = {
     "tip":          ("#F59E0B", "#FFFBEB", "技巧与观点"),
 }
 CAT_ICONS = {"industry": "🏢", "ai-products": "🚀", "paper": "📄", "tip": "💡"}
+CAT_NAMES = {"industry": "行业动态", "ai-products": "产品发布/更新", "paper": "论文研究", "tip": "技巧与观点"}
 
 
 # ── 跨平台字体 ──────────────────────────────────────────
@@ -49,6 +50,7 @@ def _find_font_paths():
 
 FONT_PATHS = _find_font_paths()
 
+
 def get_font(size, bold=False):
     for fp in FONT_PATHS:
         if os.path.exists(fp):
@@ -66,6 +68,7 @@ def get_font(size, bold=False):
 
 # ── 1. 抓取新闻 ─────────────────────────────────────────
 def fetch_news():
+    """从 AI HOT API 获取当日精选 AI 新闻。"""
     try:
         resp = requests.get(API_URL, headers={"User-Agent": UA}, timeout=30)
         resp.raise_for_status()
@@ -77,6 +80,7 @@ def fetch_news():
 
 
 def classify_news(articles):
+    """按类别分桶，优先使用 API 返回的 category，否则基于关键词匹配。"""
     buckets = {k: [] for k in CAT_COLORS}
     api_cat_map = {
         "ai-models": "ai-products", "ai-products": "ai-products",
@@ -113,6 +117,7 @@ def classify_news(articles):
 
 
 def select_top(buckets, counts=None):
+    """从每个分类中选取 top-N 条，并分配序号。"""
     if counts is None:
         counts = {"industry": 5, "ai-products": 5, "paper": 2, "tip": 3}
     result = {}
@@ -213,12 +218,8 @@ def generate_image(selected, date_str):
         [margin, y, margin + content_w, y + signal_h], radius=12, fill=signal_bg)
     draw.text((margin + 20, y + 20), "📡 今日信号",
               fill="#3B82F6", font=get_font(28, bold=True))
-    signals = [
-        "工业AI与物理仿真成为新热点，Mistral收购案标志行业拐点",
-        "Agent工具链加速向开发工作流渗透，Google I/O全栈布局",
-        "推理成本结构正被上下文与Agent任务重塑，96K token成中位",
-    ]
-    for i, s in enumerate(signals):
+    signals = _generate_signals(selected)
+    for i, s in enumerate(signals[:3]):
         draw.text((margin + 40, y + 60 + i * 40), f"• {s}",
                   fill="#374151", font=get_font(22))
     y += signal_h + 40
@@ -227,53 +228,171 @@ def generate_image(selected, date_str):
     return img
 
 
+def _generate_signals(selected):
+    """基于真实文章数据生成今日信号摘要。"""
+    signals = []
+    all_titles = []
+    for cat_key in ["industry", "ai-products", "paper", "tip"]:
+        for item in selected.get(cat_key, []):
+            all_titles.append(item["title"])
+
+    titles_text = " ".join(all_titles)
+
+    if any(kw in titles_text for kw in ["Agent", "MCP", "工具", "自动化", "工作流"]):
+        signals.append("Agent 和自动化工具生态持续扩展，开发范式加速演变")
+    if any(kw in titles_text for kw in ["NVIDIA", "英伟达", "GPU", "芯片", "Blackwell"]):
+        signals.append("芯片与算力领域竞争加剧，硬件军备竞赛持续升温")
+    if any(kw in titles_text for kw in ["模型", "发布", "开源", "LLM", "GPT", "Claude", "Gemini"]):
+        signals.append("大模型竞争白热化，新模型与能力发布节奏加快")
+    if any(kw in titles_text for kw in ["融资", "收购", "投资", "IPO", "财报"]):
+        signals.append("AI 投融资持续活跃，行业整合加速推进")
+    if any(kw in titles_text for kw in ["推理", "训练", "成本", "优化"]):
+        signals.append("推理成本与训练效率成为技术竞争的核心焦点")
+
+    # 确保至少有3条
+    fallback = [
+        "AI 技术正从互联网工具走向工业基础设施",
+        "Agent 工具链加速向开发工作流渗透",
+        "推理成本结构正被上下文与 Agent 任务重塑",
+    ]
+    while len(signals) < 3:
+        for fb in fallback:
+            if fb not in signals:
+                signals.append(fb)
+                break
+    return signals[:3]
+
+
 # ── 3. 文案生成 ─────────────────────────────────────────
+def detect_themes(all_titles):
+    """基于文章标题关键词自动检测今日主题，返回 (主题标题, 主题描述) 列表。"""
+    titles_text = " ".join(all_titles)
+    themes = []
+
+    patterns = [
+        (["NVIDIA", "英伟达", "GPU", "Blackwell", "芯片", "算力", "处理器"],
+         "芯片与算力：军备竞赛加速",
+         "今日芯片/算力领域的消息密集，NVIDIA 和各大芯片厂商动作频繁。"
+         "算力军备竞赛仍是 AI 基础设施层的主旋律，硬件迭代速度远超预期。"),
+
+        (["Agent", "MCP", "工具链", "自动化", "Workflow", "工作流", "插件"],
+         "Agent 生态：工具链全面渗透",
+         "Agent 和自动化工具生态持续扩展，从开发框架到部署平台再到开放标准，"
+         "Agent 正在重塑软件开发和日常工作流的范式。"),
+
+        (["开源", "开源模型", "发布", "上线", "推出"],
+         "模型与产品：发布潮持续",
+         "今天有多款新产品和模型发布/更新。各大厂商的迭代速度说明 AI 产品层的竞争"
+         "已经从「有没有」进入到「好不好用」的阶段。"),
+
+        (["融资", "收购", "投资", "IPO", "估值", "财报", "营收"],
+         "资本动向：热钱持续涌入",
+         "AI 领域的资本活动仍然活跃，大额投资和收购案层出不穷。"
+         "资本对 AI 的押注没有任何降温迹象。"),
+
+        (["推理", "训练", "架构", "优化", "成本", "效率"],
+         "技术演进：推理效率成焦点",
+         "AI 推理和训练技术持续演进，成本优化和架构创新是今天技术类的主题。"
+         "如何让 AI 更便宜地运行，正在成为比「造更大的模型」更重要的课题。"),
+
+        (["特斯拉", "自动驾驶", "FSD", "机器人", "具身", "硬件"],
+         "具身智能与自动驾驶：落地加速",
+         "自动驾驶和具身智能领域今天有重要进展。AI 能力正从纯数字世界向物理世界"
+         "延伸，落地场景越来越具体。"),
+
+        (["政策", "监管", "法规", "安全", "伦理"],
+         "政策与治理：规则正在成型",
+         "围绕 AI 的政策讨论和监管框架正在加速成型，各国对 AI 治理的重视程度"
+         "持续提升。合规将成为 AI 企业的必修课。"),
+    ]
+
+    for keywords, title, desc in patterns:
+        if any(kw.lower() in titles_text.lower() for kw in keywords):
+            themes.append((title, desc))
+
+    if not themes:
+        themes.append((
+            "AI 生态：全面活跃的一天",
+            "今天 AI 圈涵盖了模型、产品、资本等多个维度的动态，"
+            "没有单一主题主导，说明整个行业处于全面活跃期。"
+        ))
+
+    return themes[:5]
+
+
 def generate_article(selected, date_str):
+    """基于从 AI HOT 获取的真实文章数据，生成完整的日报分析文案。
+
+    返回的字符串使用真实换行符，可直接用于飞书文本消息推送。
+    """
     total = sum(len(v) for v in selected.values())
     lines = [
         f"# {date_str.replace('.', '')} AI圈日报",
         "",
-        f"今天 AI 圈的 {total} 条重点动态，我整理成了一张长图。",
+        f"今天 AI 圈共 {total} 条重点动态，来自 AI HOT (aihot.virxact.com) 的真实精选内容。",
+        "以下是分类梳理和深度分析。",
         "",
     ]
+
+    # ── 分类逐条展示（基于真实 API 数据） ──
+    for cat_key in ["industry", "ai-products", "paper", "tip"]:
+        items = selected.get(cat_key, [])
+        if not items:
+            continue
+        lines.append(f"## {CAT_ICONS[cat_key]} {CAT_NAMES[cat_key]}（{len(items)}条）")
+        lines.append("")
+        for item in items:
+            title = item["title"]
+            summary = item.get("summary", "")
+            source = item.get("source", "")
+            url = item.get("url", "")
+            lines.append(f"**{item['id']}. {title}**")
+            if summary:
+                lines.append(f"> {summary}")
+            if source:
+                source_line = f"  来源：{source}"
+                if url:
+                    source_line += f"（{url}）"
+                lines.append(source_line)
+            lines.append("")
+        lines.append("")
+
+    # ── 动态趋势分析（基于文章关键词自动检测） ──
     all_titles = []
     for cat_key in ["industry", "ai-products", "paper", "tip"]:
         for item in selected.get(cat_key, []):
-            all_titles.append(item["title"].split("：")[0].split("，")[0])
-    lines.append("这一天的信息，表面看是新闻很多：" + "、".join(all_titles[:8]) + "……")
+            all_titles.append(item["title"])
+
+    themes = detect_themes(all_titles)
+
+    lines.append("## 📡 今日深度观察")
     lines.append("")
-    lines.append("但如果放在一起看，背后其实有几个很明显的信号。")
+    lines.append("基于以上真实资讯，今天 AI 圈有几个值得关注的趋势：")
     lines.append("")
 
-    trends = [
-        ("第一，**AI 正在从「互联网工具」走向「工业基础设施」**。",
-         "今天最重磅的是 AI 技术在工业场景的深度渗透——物理仿真、数字孪生、智能制造。AI 不再只是生成文本和图片，而是开始处理复杂的工程问题，从消费级向工业级关键拐点迈进。"),
-        ("第二，**企业用 AI 不一定天然省钱**。",
-         "基于 token 和 agent 的 AI 使用模式，综合开销已可能超过人类员工费用。这打破了「AI 必然降本增效」的简单假设，推理成本结构已与早期小模型时代截然不同。"),
-        ("第三，**AI 基建的投入还会继续变大**。",
-         "超大规模云厂商的 AI 基建年度开支仍在指数级增长，远超外界预期。算力需求、模型训练、推理部署构成了持续膨胀的投入飞轮。"),
-        ("第四，**AI 对入门级岗位的压力正在加剧**。",
-         "AI 工具被广泛用于入门级任务，企业招聘重心转向高级岗位。初级岗位削减比例大幅跃升，不仅是技术替代问题，更是人才结构重塑的开始。"),
-        ("第五，**Agent 正在重塑开发者工作流和推理经济学**。",
-         "从开发工具链到开放标准再到托管代理服务，Agent 形成了从开发、接口到部署的完整生态。真实编码 Agent 请求的中位上下文已达近10万token。"),
-    ]
-    for heading, body in trends:
-        lines.append(heading)
-        lines.append(body)
+    for idx, (theme_title, theme_desc) in enumerate(themes, 1):
+        lines.append(f"### {idx}. {theme_title}")
+        lines.append(theme_desc)
         lines.append("")
 
-    lines.extend([
-        "整体看下来，AI 圈正在经历三个关键转变：从消费级到工业级、从降本工具到成本中心、从辅助工具到工作流核心。",
-        "",
-        "所以我觉得，普通人看 AI 新闻，不一定要追每一个新模型。更重要的是看懂：",
-        "- 哪些变化会进入真实业务？",
-        "- 哪些工具会改变工作方式？",
-        "- 哪些趋势会影响职业机会？",
-        "",
-        "这才是每天追 AI 动态真正有价值的地方。",
-        "",
-        "#AI日报 #人工智能 #AI工具 #Agent #工业AI #大模型",
-    ])
+    # ── 总结 ──
+    lines.append("---")
+    lines.append("")
+    lines.append("### 写在最后")
+    lines.append("")
+    lines.append(
+        "以上内容全部来自 AI HOT 当日精选的 AI 行业资讯，"
+        "涵盖行业动态、产品发布、论文研究和技术观点。"
+    )
+    lines.append("")
+    lines.append(
+        "追 AI 新闻不是为了焦虑，而是为了理解这个领域的变化方向和节奏。"
+        "看懂趋势比追每一个模型更重要。"
+    )
+    lines.append("")
+    lines.append("#AI日报 #人工智能 #AI工具 #Agent #大模型")
+
+    # 使用真实换行符拼接，不是字面字符串 "\\n"
     return "\n".join(lines)
 
 
@@ -382,7 +501,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. 抓取 & 分类 & 精选
-    print("[1/5] 抓取 AI HOT 资讯...")
+    print("[1/5] 从 AI HOT 抓取资讯...")
     articles = fetch_news()
     if not articles:
         print("[ERROR] 无法获取新闻数据，退出。", file=sys.stderr)
@@ -426,10 +545,10 @@ def main():
             image_key = upload_image(token, buf.getvalue())
             msg_id_img = send_image_message(token, chat_id, image_key)
             print(f"  图片消息已发送: {msg_id_img}")
-            # 推送完整分析文案（飞书文本消息限制约30KB，截取前4000字）
-            article_text = article.replace("\\n", "\n")
-            if len(article_text) > 4000:
-                article_text = article_text[:4000] + "\n\n...(完整文案见 Markdown 文件)"
+            # 发送完整分析文案（generate_article 已使用真实换行符）
+            article_text = article
+            if len(article_text) > 30000:
+                article_text = article_text[:30000] + "\n\n...(完整文案见 Markdown 文件)"
             msg_id_txt = send_text_message(token, chat_id, article_text)
             print(f"  分析文案已发送: {msg_id_txt}")
         except Exception as e:
